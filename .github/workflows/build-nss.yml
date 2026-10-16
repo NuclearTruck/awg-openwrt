@@ -80,12 +80,23 @@ jobs:
         run: |
           set -euo pipefail
           cd openwrt
-          cp feeds.conf.default feeds.conf
+
+          echo "--- feeds.conf.default of the tree ---"
+          cat feeds.conf.default
+          echo "--------------------------------------"
+
+          # drop the tree's own nss feed, we add ours below
+          grep -Ev '^src-[a-z]+[[:space:]]+nss[[:space:]]' feeds.conf.default > feeds.conf
+
           if [ -n "$FEED_COMMIT" ]; then
             echo "src-git nss https://github.com/${FEED_REPO}.git^${FEED_COMMIT}" >> feeds.conf
           else
             echo "src-git nss https://github.com/${FEED_REPO}.git;${FEED_REF}" >> feeds.conf
           fi
+
+          echo "--- feeds.conf used ---"
+          cat feeds.conf
+
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           ./scripts/feeds list -r nss | grep -q qca-nss-drv && echo "nss feed OK"
@@ -181,9 +192,6 @@ jobs:
             echo "- result: MISMATCH" >> "$GITHUB_STEP_SUMMARY"
             echo "::warning::vermagic mismatch: built $VM, router has $EXPECT_VERMAGIC"
             if [ "$STRICT" = "true" ]; then
-              mkdir -p ../diag
-              cp .config ../diag/config.used
-              echo "$VM" > ../diag/vermagic.txt
               exit 1
             fi
           fi
@@ -205,18 +213,23 @@ jobs:
       - name: Collect results
         if: always()
         run: |
-          set -uo pipefail
+          set +e
           mkdir -p out diag
+          [ -d openwrt ] || { echo "openwrt directory missing, nothing to collect"; exit 0; }
           cd openwrt
-          cp .config ../diag/config.used 2>/dev/null || true
-          VM="${{ steps.vermagic.outputs.vermagic }}"
-          [ -n "$VM" ] && echo "$VM" > ../diag/vermagic.txt
-          for p in kmod-amneziawg amneziawg-tools luci-proto-amneziawg luci-i18n-amneziawg-ru; do
-            f=$(find bin -type f -name "${p}-*.apk" -print -quit)
-            [ -n "$f" ] && cp "$f" "../out/$(basename "$f")"
-          done
-          find bin/targets -type f -name '*sysupgrade*' -exec cp {} ../out/ \; 2>/dev/null || true
+          cp .config ../diag/config.used 2>/dev/null
+          cp feeds.conf ../diag/feeds.conf.used 2>/dev/null
+          VM_FILE=$(find build_dir -name .vermagic -path '*linux-*' -print -quit 2>/dev/null)
+          [ -n "$VM_FILE" ] && cp "$VM_FILE" ../diag/vermagic.txt
+          if [ -d bin ]; then
+            for p in kmod-amneziawg amneziawg-tools luci-proto-amneziawg luci-i18n-amneziawg-ru; do
+              f=$(find bin -type f -name "${p}-*.apk" -print -quit)
+              [ -n "$f" ] && cp "$f" "../out/$(basename "$f")"
+            done
+            find bin/targets -type f -name '*sysupgrade*' -exec cp {} ../out/ \; 2>/dev/null
+          fi
           ls -la ../out ../diag
+          exit 0
 
       - name: Upload packages
         if: always()
