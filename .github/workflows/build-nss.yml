@@ -18,7 +18,7 @@ on:
         default: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -170,3 +170,40 @@ jobs:
             diag/*
           if-no-files-found: warn
           retention-days: 30
+
+      - name: Publish release
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VM: ${{ steps.vermagic.outputs.vermagic }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          if [ "$VM" != "$EXPECT_VERMAGIC" ]; then
+            echo "::warning::vermagic differs from the router's, not publishing"
+            exit 0
+          fi
+
+          files=(out/*.apk)
+          [ ${#files[@]} -gt 0 ] || { echo "no packages to publish"; exit 1; }
+
+          rel="awg-${TAG}"
+          cat > notes.md <<EOF
+          AmneziaWG for the firmware \`${TAG}\` (${GROUP}, TP-Link Archer AX55 v1).
+
+          Kernel vermagic: \`${VM}\`
+
+          Install on the router:
+          \`\`\`
+          apk add --allow-untrusted /tmp/kmod-amneziawg-*.apk /tmp/amneziawg-tools-*.apk /tmp/luci-proto-amneziawg-*.apk
+          \`\`\`
+          Works only with that exact firmware build: after updating the firmware the kernel hash changes and the packages must be rebuilt.
+          EOF
+
+          if gh release view "$rel" >/dev/null 2>&1; then
+            gh release upload "$rel" "${files[@]}" --clobber
+          else
+            gh release create "$rel" "${files[@]}" --title "$rel" --notes-file notes.md --target "$GITHUB_SHA"
+          fi
