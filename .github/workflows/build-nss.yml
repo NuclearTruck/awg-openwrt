@@ -1,0 +1,72 @@
+name: Build AWG for NSS tree
+on:
+  workflow_dispatch:
+    inputs:
+      tree_repo:   { default: "JuliusBairaktaris/openwrt-nss-edma" }
+      tree_ref:    { default: "nss-edma-rework" }   # лучше точный коммит
+      feed_ref:    { default: "edma-nss" }
+      group:       { default: "xiaomi_ax3600" }     # папка в builder/devices/
+      expect_vermagic: { default: "f0788b71c3928ce631bbe6b6ef1f485e" }
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+        with: { path: awg }
+      - uses: actions/checkout@v7
+        with:
+          repository: JuliusBairaktaris/Qualcommax_NSS_Builder
+          path: builder
+
+      - name: Free disk and install deps
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gettext git \
+            libncurses5-dev libssl-dev python3-setuptools python3-pyelftools rsync swig \
+            unzip zlib1g-dev file wget zstd libelf-dev
+
+      - name: Clone NSS tree and feeds
+        run: |
+          git clone https://github.com/${{ inputs.tree_repo }} openwrt
+          cd openwrt
+          git checkout ${{ inputs.tree_ref }}
+          cp feeds.conf.default feeds.conf
+          echo "src-git nss https://github.com/JuliusBairaktaris/nss-packages.git;${{ inputs.feed_ref }}" >> feeds.conf
+          ./scripts/feeds update -a && ./scripts/feeds install -a
+          cp -r ../awg/kmod-amneziawg ../awg/amneziawg-tools ../awg/luci-proto-amneziawg package/
+
+      - name: Configure (same config as the firmware)
+        run: |
+          cd openwrt
+          B=../builder/devices
+          cat $B/common/config $B/${{ inputs.group }}/config > .config
+          {
+            echo "CONFIG_PACKAGE_kmod-amneziawg=m"
+            echo "CONFIG_PACKAGE_amneziawg-tools=m"
+            echo "CONFIG_PACKAGE_luci-proto-amneziawg=m"
+          } >> .config
+          make defconfig
+
+      - name: Build toolchain, kernel, packages
+        run: |
+          cd openwrt
+          make -j$(nproc) tools/install toolchain/install
+          make -j$(nproc) target/linux/compile
+          make -j$(nproc) package/kmod-amneziawg/compile package/amneziawg-tools/compile package/luci-proto-amneziawg/compile
+
+      - name: Check kernel vermagic
+        run: |
+          cd openwrt
+          V=$(cat build_dir/target-*/linux-*/linux-*/.vermagic)
+          echo "vermagic: $V"
+          [ "$V" = "${{ inputs.expect_vermagic }}" ] || { echo "MISMATCH"; exit 1; }
+
+      - name: Collect
+        run: |
+          mkdir out
+          find openwrt/bin -name 'kmod-amneziawg*.apk' -o -name 'amneziawg-tools*.apk' -o -name 'luci-proto-amneziawg*.apk' | xargs -I{} cp {} out/
+      - uses: actions/upload-artifact@v4
+        with: { name: awg-nss, path: out/*.apk }
