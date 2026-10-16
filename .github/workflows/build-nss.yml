@@ -1,26 +1,14 @@
-name: Build AWG for NSS tree (AX55 v1)
+name: Build AWG for NSS release (AX55 v1)
 
 on:
   workflow_dispatch:
     inputs:
-      tree_repo:
-        description: "NSS tree repository"
-        default: "kuncy7/openwrt-nss-edma"
-      tree_ref:
-        description: "Tree commit or branch (your firmware is r37561-dff118f852)"
-        default: "dff118f852"
-      feed_repo:
-        description: "NSS packages feed repository"
-        default: "kuncy7/nss-packages"
-      feed_ref:
-        description: "Feed branch (ignored if feed_commit is set)"
-        default: "ipq50xx-rebase"
-      feed_commit:
-        description: "Pin feed to this commit (from feeds.buildinfo), optional"
-        default: ""
-      config_url:
-        description: "URL of your firmware's config.buildinfo, optional (best option)"
-        default: ""
+      release_tag:
+        description: "Release of kuncy7/openwrt-nss-edma your firmware came from"
+        default: "ipq50xx-2026.10.15-2"
+      group:
+        description: "Group in the release (AX55 v1 is in std)"
+        default: "std"
       expect_vermagic:
         description: "Kernel hash your router has"
         default: "f0788b71c3928ce631bbe6b6ef1f485e"
@@ -28,10 +16,6 @@ on:
         description: "Fail the build if the kernel hash differs"
         type: boolean
         default: true
-      include_in_image:
-        description: "Build awg as =y and also produce a full firmware image"
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -41,16 +25,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
-      TREE_REPO: ${{ inputs.tree_repo }}
-      TREE_REF: ${{ inputs.tree_ref }}
-      FEED_REPO: ${{ inputs.feed_repo }}
-      FEED_REF: ${{ inputs.feed_ref }}
-      FEED_COMMIT: ${{ inputs.feed_commit }}
-      CONFIG_URL: ${{ inputs.config_url }}
+      TREE_REPO: kuncy7/openwrt-nss-edma
+      TAG: ${{ inputs.release_tag }}
+      GROUP: ${{ inputs.group }}
       EXPECT_VERMAGIC: ${{ inputs.expect_vermagic }}
       STRICT: ${{ inputs.strict }}
-      IN_IMAGE: ${{ inputs.include_in_image }}
-      DEVICE_SYM: CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_tplink_archer-ax55-v1
+      REL_URL: https://github.com/kuncy7/openwrt-nss-edma/releases/download/${{ inputs.release_tag }}
 
     steps:
       - name: Checkout AWG sources
@@ -64,106 +44,60 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
           sudo apt-get update
           sudo apt-get install -y build-essential clang flex bison g++ gawk gettext git \
-            libncurses5-dev libssl-dev python3-setuptools python3-pyelftools rsync swig \
-            unzip zlib1g-dev file wget zstd libelf-dev curl
-          df -h /
+            libncurses-dev libssl-dev python3-setuptools python3-pyelftools rsync swig \
+            unzip zlib1g-dev file wget zstd libelf-dev curl bzip2
+          df -h / | tail -1
 
-      - name: Clone NSS tree
+      - name: Clone the tree at the release tag
         run: |
           set -euo pipefail
           git clone "https://github.com/${TREE_REPO}.git" openwrt
           cd openwrt
-          git checkout "$TREE_REF"
-          echo "Tree HEAD: $(git rev-parse --short=10 HEAD)"
+          git checkout "$TAG"
+          echo "Tree HEAD: $(git rev-parse --short=12 HEAD)"
 
-      - name: Set up feeds
+      - name: Download the release's build info
         run: |
           set -euo pipefail
           cd openwrt
+          curl -fL "$REL_URL/config-${GROUP}.buildinfo" -o ../config.release
+          curl -fL "$REL_URL/feeds-${GROUP}.buildinfo"  -o ../feeds.release
+          echo "--- feeds.release ---"; cat ../feeds.release
+          echo "--- config.release (head) ---"; head -n 20 ../config.release; wc -l ../config.release
 
-          echo "--- feeds.conf.default of the tree ---"
-          cat feeds.conf.default
-          echo "--------------------------------------"
-
-          # drop the tree's own nss feed, we add ours below
-          grep -Ev '^src-[a-z]+[[:space:]]+nss[[:space:]]' feeds.conf.default > feeds.conf
-
-          if [ -n "$FEED_COMMIT" ]; then
-            echo "src-git nss https://github.com/${FEED_REPO}.git^${FEED_COMMIT}" >> feeds.conf
+      - name: Set up feeds (pinned to the release's commits)
+        run: |
+          set -euo pipefail
+          cd openwrt
+          if grep -q '^src-' ../feeds.release; then
+            cp ../feeds.release feeds.conf
           else
-            echo "src-git nss https://github.com/${FEED_REPO}.git;${FEED_REF}" >> feeds.conf
+            echo "::warning::feeds.release is not in feeds.conf format, falling back to feeds.conf.default"
+            cp feeds.conf.default feeds.conf
           fi
-
-          echo "--- feeds.conf used ---"
-          cat feeds.conf
-
+          echo "--- feeds.conf used ---"; cat feeds.conf
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           ./scripts/feeds list -r nss | grep -q qca-nss-drv && echo "nss feed OK"
-
           cp -r ../awg/kmod-amneziawg ../awg/amneziawg-tools ../awg/luci-proto-amneziawg package/
 
-      - name: Prepare .config
+      - name: Prepare .config (release config + AWG as modules)
         run: |
           set -euo pipefail
           cd openwrt
-
-          if [ -n "$CONFIG_URL" ]; then
-            echo "Using config from $CONFIG_URL"
-            curl -fL "$CONFIG_URL" -o .config
-          elif [ -f ../awg/nss-ax55.config ]; then
-            echo "Using nss-ax55.config from the repository"
-            cp ../awg/nss-ax55.config .config
-          else
-            echo "WARNING: no firmware config supplied, using a best-effort fallback"
-            cat > .config <<'EOF'
-          CONFIG_TARGET_qualcommax=y
-          CONFIG_TARGET_qualcommax_ipq50xx=y
-          CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_tplink_archer-ax55-v1=y
-          CONFIG_PACKAGE_nss-tools-dwmac=y
-          CONFIG_PACKAGE_nss-firmware=y
-          CONFIG_NSS_FIRMWARE_VERSION_12_2=y
-          CONFIG_NSS_MEM_PROFILE_MEDIUM=y
-          CONFIG_NSS_DRV_VLAN_ENABLE=y
-          CONFIG_NSS_DRV_IPV6_ENABLE=y
-          CONFIG_NSS_DRV_VIRT_IF_ENABLE=y
-          CONFIG_PACKAGE_kmod-ppp=y
-          CONFIG_PACKAGE_kmod-pppoe=y
-          CONFIG_PACKAGE_kmod-qca-nss-drv-pppoe=y
-          CONFIG_PACKAGE_MAC80211_NSS_SUPPORT=y
-          CONFIG_ATH11K_NSS_SUPPORT=y
-          CONFIG_NSS_DRV_WIFIOFFLOAD_ENABLE=y
-          CONFIG_NSS_DRV_WIFI_EXT_VDEV_ENABLE=y
-          CONFIG_PACKAGE_kmod-wireguard=y
-          CONFIG_PACKAGE_kmod-sched-cake=y
-          CONFIG_PACKAGE_kmod-ifb=y
-          CONFIG_PACKAGE_kmod-tun=y
-          CONFIG_PACKAGE_kmod-inet-diag=y
-          CONFIG_PACKAGE_kmod-nft-offload=y
-          CONFIG_PACKAGE_kmod-nft-tproxy=y
-          CONFIG_PACKAGE_kmod-usb-storage-uas=y
-          CONFIG_PACKAGE_kmod-fs-ext4=y
-          CONFIG_PACKAGE_kmod-fs-exfat=y
-          CONFIG_PACKAGE_kmod-fs-ntfs3=y
-          CONFIG_PACKAGE_kmod-fs-vfat=y
-          EOF
-          fi
-
-          if [ "$IN_IMAGE" = "true" ]; then MODE=y; else MODE=m; fi
+          cp ../config.release .config
           {
-            echo "CONFIG_PACKAGE_kmod-amneziawg=$MODE"
-            echo "CONFIG_PACKAGE_amneziawg-tools=$MODE"
-            echo "CONFIG_PACKAGE_luci-proto-amneziawg=$MODE"
-            echo "CONFIG_PACKAGE_luci-i18n-amneziawg-ru=$MODE"
+            echo "CONFIG_PACKAGE_kmod-amneziawg=m"
+            echo "CONFIG_PACKAGE_amneziawg-tools=m"
+            echo "CONFIG_PACKAGE_luci-proto-amneziawg=m"
+            echo "CONFIG_PACKAGE_luci-i18n-amneziawg-ru=m"
           } >> .config
-
           make defconfig
-
-          grep -q "^${DEVICE_SYM}=y" .config || {
-            echo "Device symbol ${DEVICE_SYM} is not selected after defconfig."
-            echo "Check the exact name: grep -n ax55 target/linux/qualcommax/image/ipq50xx.mk"
+          grep -E 'DEVICE_tplink_archer-ax55-v1=y' .config || {
+            echo "::error::AX55 v1 is not selected in this config (wrong group?)"
             exit 1
           }
+          grep -E '^CONFIG_PACKAGE_(kmod-amneziawg|amneziawg-tools|luci-proto-amneziawg)=' .config
 
       - name: Build tools, toolchain and kernel
         run: |
@@ -191,10 +125,9 @@ jobs:
           else
             echo "- result: MISMATCH" >> "$GITHUB_STEP_SUMMARY"
             echo "::warning::vermagic mismatch: built $VM, router has $EXPECT_VERMAGIC"
-            if [ "$STRICT" = "true" ]; then
-              exit 1
-            fi
+            [ "$STRICT" = "true" ] && exit 1
           fi
+          exit 0
 
       - name: Build AWG packages
         run: |
@@ -204,34 +137,30 @@ jobs:
           make -j"$(nproc)" package/amneziawg-tools/compile V=s
           make -j"$(nproc)" package/luci-proto-amneziawg/compile V=s
 
-      - name: Build firmware image (optional)
-        if: ${{ inputs.include_in_image }}
-        run: |
-          cd openwrt
-          make -j"$(nproc)"
-
       - name: Collect results
         if: always()
         run: |
           set +e
           mkdir -p out diag
-          [ -d openwrt ] || { echo "openwrt directory missing, nothing to collect"; exit 0; }
+          cp config.release feeds.release diag/ 2>/dev/null
+          [ -d openwrt ] || exit 0
           cd openwrt
           cp .config ../diag/config.used 2>/dev/null
           cp feeds.conf ../diag/feeds.conf.used 2>/dev/null
           VM_FILE=$(find build_dir -name .vermagic -path '*linux-*' -print -quit 2>/dev/null)
           [ -n "$VM_FILE" ] && cp "$VM_FILE" ../diag/vermagic.txt
+          KCFG=$(find build_dir -path '*linux-*' -name .config -print -quit 2>/dev/null)
+          [ -n "$KCFG" ] && cp "$KCFG" ../diag/kernel.config
           if [ -d bin ]; then
             for p in kmod-amneziawg amneziawg-tools luci-proto-amneziawg luci-i18n-amneziawg-ru; do
               f=$(find bin -type f -name "${p}-*.apk" -print -quit)
               [ -n "$f" ] && cp "$f" "../out/$(basename "$f")"
             done
-            find bin/targets -type f -name '*sysupgrade*' -exec cp {} ../out/ \; 2>/dev/null
           fi
           ls -la ../out ../diag
           exit 0
 
-      - name: Upload packages
+      - name: Upload
         if: always()
         uses: actions/upload-artifact@v4
         with:
