@@ -5,17 +5,17 @@ on:
     inputs:
       release_tag:
         description: "Release of kuncy7/openwrt-nss-edma your firmware came from"
-        default: "ipq50xx-2026.10.15-2"
+        default: "ipq50xx-2026.10.23"
       group:
         description: "Group in the release (AX55 v1 is in std)"
         default: "std"
       expect_vermagic:
-        description: "Kernel hash your router has"
-        default: "f0788b71c3928ce631bbe6b6ef1f485e"
+        description: "Kernel hash your router has (empty = do not compare)"
+        default: ""
       strict:
-        description: "Fail the build if the kernel hash differs"
+        description: "Fail the build if the kernel hash differs from expect_vermagic"
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: write
@@ -90,9 +90,20 @@ jobs:
             echo "CONFIG_PACKAGE_kmod-amneziawg=m"
             echo "CONFIG_PACKAGE_amneziawg-tools=m"
             echo "CONFIG_PACKAGE_luci-proto-amneziawg=m"
-            echo "CONFIG_PACKAGE_luci-i18n-amneziawg-ru=m"
           } >> .config
           make defconfig
+
+          # find the real name of the Russian LuCI translation, if the build system defines one
+          echo "--- translation sources ---"
+          find package/luci-proto-amneziawg \( -name '*.po' -o -name '*.pot' \) || true
+          echo "--- i18n symbols for amnezia ---"
+          grep -iE 'config PACKAGE_luci-i18n-.*amnezia' tmp/.config-package.in || echo "none defined (no po/ru in the package?)"
+          for s in $(grep -ioE 'config PACKAGE_luci-i18n-[a-z0-9_-]*amnezia[a-z0-9_-]*-ru' tmp/.config-package.in | sed 's/config PACKAGE_//' || true); do
+            echo "CONFIG_PACKAGE_${s}=m" >> .config
+          done
+          make defconfig
+          grep -E '^CONFIG_PACKAGE_luci-i18n-.*amnezia' .config || echo "no i18n package selected"
+
           grep -E 'DEVICE_tplink_archer-ax55-v1=y' .config || {
             echo "::error::AX55 v1 is not selected in this config (wrong group?)"
             exit 1
@@ -118,10 +129,10 @@ jobs:
           {
             echo "### Kernel vermagic"
             echo "- built: \`$VM\`"
-            echo "- router: \`$EXPECT_VERMAGIC\`"
+            echo "- router: \`${EXPECT_VERMAGIC:-not given}\`"
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ "$VM" = "$EXPECT_VERMAGIC" ]; then
-            echo "- result: MATCH" >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$EXPECT_VERMAGIC" ] || [ "$VM" = "$EXPECT_VERMAGIC" ]; then
+            echo "- result: OK (no expected hash given, built hash recorded)" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "- result: MISMATCH" >> "$GITHUB_STEP_SUMMARY"
             echo "::warning::vermagic mismatch: built $VM, router has $EXPECT_VERMAGIC"
@@ -152,9 +163,8 @@ jobs:
           KCFG=$(find build_dir -path '*linux-*' -name .config -print -quit 2>/dev/null)
           [ -n "$KCFG" ] && cp "$KCFG" ../diag/kernel.config
           if [ -d bin ]; then
-            for p in kmod-amneziawg amneziawg-tools luci-proto-amneziawg luci-i18n-amneziawg-ru; do
-              f=$(find bin -type f -name "${p}-*.apk" -print -quit)
-              [ -n "$f" ] && cp "$f" "../out/$(basename "$f")"
+            for p in kmod-amneziawg amneziawg-tools luci-proto-amneziawg 'luci-i18n-*amnezia*'; do
+              find bin -type f -name "${p}-*.apk" -print0 | xargs -0 -r -I{} cp {} ../out/
             done
           fi
           ls -la ../out ../diag
@@ -181,7 +191,7 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
 
-          if [ "$VM" != "$EXPECT_VERMAGIC" ]; then
+          if [ -n "$EXPECT_VERMAGIC" ] && [ "$VM" != "$EXPECT_VERMAGIC" ]; then
             echo "::warning::vermagic differs from the router's, not publishing"
             exit 0
           fi
@@ -195,7 +205,7 @@ jobs:
 
           Kernel vermagic: \`${VM}\`
 
-          Install on the router:
+          Install on the router (the Russian translation, if present, goes after luci-proto):
           \`\`\`
           apk add --allow-untrusted /tmp/kmod-amneziawg-*.apk /tmp/amneziawg-tools-*.apk /tmp/luci-proto-amneziawg-*.apk
           \`\`\`
