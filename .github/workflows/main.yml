@@ -1,0 +1,243 @@
+name: Build AWG for NSS release (AX55 v1)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release of kuncy7/openwrt-nss-edma your firmware came from"
+        default: "ipq50xx-2026.10.28"
+      group:
+        description: "Group in the release (AX55 v1 is in std)"
+        default: "std"
+      expect_vermagic:
+        description: "Kernel hash your router has (empty = do not compare)"
+        default: ""
+      strict:
+        description: "Fail the build if the kernel hash differs from expect_vermagic"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      TREE_REPO: kuncy7/openwrt-nss-edma
+      TAG: ${{ inputs.release_tag }}
+      GROUP: ${{ inputs.group }}
+      EXPECT_VERMAGIC: ${{ inputs.expect_vermagic }}
+      STRICT: ${{ inputs.strict }}
+      REL_URL: https://github.com/kuncy7/openwrt-nss-edma/releases/download/${{ inputs.release_tag }}
+
+    steps:
+      - name: Checkout AWG sources
+        uses: actions/checkout@v7
+        with:
+          path: awg
+
+      - name: Free disk space and install build dependencies
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gettext git \
+            libncurses-dev libssl-dev python3-setuptools python3-pyelftools rsync swig \
+            unzip zlib1g-dev file wget zstd libelf-dev curl bzip2
+          df -h / | tail -1
+
+      - name: Clone the tree at the release tag
+        run: |
+          set -euo pipefail
+          git clone "https://github.com/${TREE_REPO}.git" openwrt
+          cd openwrt
+          git checkout "$TAG"
+          echo "Tree HEAD: $(git rev-parse --short=12 HEAD)"
+
+      - name: Download the release's build info
+        run: |
+          set -euo pipefail
+          cd openwrt
+          curl -fL "$REL_URL/config-${GROUP}.buildinfo" -o ../config.release
+          curl -fL "$REL_URL/feeds-${GROUP}.buildinfo"  -o ../feeds.release
+          echo "--- feeds.release ---"; cat ../feeds.release
+          echo "--- config.release (head) ---"; head -n 20 ../config.release; wc -l ../config.release
+
+      - name: Set up feeds (pinned to the release's commits)
+        run: |
+          set -euo pipefail
+          cd openwrt
+          if grep -q '^src-' ../feeds.release; then
+            cp ../feeds.release feeds.conf
+          else
+            echo "::warning::feeds.release is not in feeds.conf format, falling back to feeds.conf.default"
+            cp feeds.conf.default feeds.conf
+          fi
+          echo "--- feeds.conf used ---"; cat feeds.conf
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          ./scripts/feeds list -r nss | grep -q qca-nss-drv && echo "nss feed OK"
+          cp -r ../awg/kmod-amneziawg ../awg/amneziawg-tools ../awg/luci-proto-amneziawg package/
+
+      - name: Prepare .config (release config + AWG)
+        run: |
+          set -euo pipefail
+          cd openwrt
+          cp ../config.release .config
+          {
+            echo "CONFIG_PACKAGE_kmod-amneziawg=m"
+            echo "CONFIG_PACKAGE_amneziawg-tools=y"
+            echo "CONFIG_PACKAGE_luci-proto-amneziawg=y"
+            echo "CONFIG_PACKAGE_luci-i18n-amneziawg-ru=y"
+          } >> .config
+          make defconfig
+
+          grep -E 'DEVICE_tplink_archer-ax55-v1=y' .config || {
+            echo "::error::AX55 v1 is not selected in this config (wrong group?)"
+            exit 1
+          }
+          grep -E '^CONFIG_PACKAGE_.*amneziawg' .config
+          grep -q '^CONFIG_PACKAGE_luci-i18n-amneziawg-ru=' .config \
+            || echo "::warning::luci-i18n-amneziawg-ru was dropped by defconfig, no Russian package will be built"
+
+      - name: Build tools, toolchain and kernel
+        run: |
+          set -euo pipefail
+          cd openwrt
+          make -j"$(nproc)" tools/install
+          make -j"$(nproc)" toolchain/install
+          make -j"$(nproc)" target/linux/compile
+
+      - name: Check kernel vermagic
+        id: vermagic
+        run: |
+          set -euo pipefail
+          cd openwrt
+          VM_FILE=$(find build_dir -name .vermagic -path '*linux-*' -print -quit)
+          VM=$(cat "$VM_FILE")
+          echo "vermagic=$VM" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Kernel vermagic"
+            echo "- built: \`$VM\`"
+            echo "- router: \`${EXPECT_VERMAGIC:-not given}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$EXPECT_VERMAGIC" ] || [ "$VM" = "$EXPECT_VERMAGIC" ]; then
+            echo "- result: OK (no expected hash given, built hash recorded)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- result: MISMATCH" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::vermagic mismatch: built $VM, router has $EXPECT_VERMAGIC"
+            [ "$STRICT" = "true" ] && exit 1
+          fi
+          exit 0
+
+      - name: Build AWG packages
+        run: |
+          set -euo pipefail
+          cd openwrt
+          make package/kmod-amneziawg/{download,prepare} V=s
+          make -j"$(nproc)" package/kmod-amneziawg/compile V=s
+          make package/luci-proto-amneziawg/{download,prepare} V=s
+          make -j"$(nproc)" package/luci-proto-amneziawg/compile V=s
+          make package/amneziawg-tools/{download,prepare} V=s
+          make -j"$(nproc)" package/amneziawg-tools/compile V=s
+
+      - name: Collect results
+        if: always()
+        run: |
+          set +e
+          mkdir -p out diag
+          cp config.release feeds.release diag/ 2>/dev/null
+          [ -d openwrt ] || exit 0
+          cd openwrt
+          cp .config ../diag/config.used 2>/dev/null
+          cp feeds.conf ../diag/feeds.conf.used 2>/dev/null
+          VM_FILE=$(find build_dir -name .vermagic -path '*linux-*' -print -quit 2>/dev/null)
+          [ -n "$VM_FILE" ] && cp "$VM_FILE" ../diag/vermagic.txt
+          KCFG=$(find build_dir -path '*linux-*' -name .config -print -quit 2>/dev/null)
+          [ -n "$KCFG" ] && cp "$KCFG" ../diag/kernel.config
+          if [ -d bin ]; then
+            for p in kmod-amneziawg amneziawg-tools luci-proto-amneziawg 'luci-i18n-*amnezia*'; do
+              find bin -type f -name "${p}-*.apk" -print0 | xargs -0 -r -I{} cp {} ../out/
+            done
+          fi
+          ls -la ../out ../diag
+          exit 0
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: awg-ax55-v1
+          path: |
+            out/*
+            diag/*
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Publish release
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.repository.default_branch }}
+          VM: ${{ steps.vermagic.outputs.vermagic }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          if [ -n "$EXPECT_VERMAGIC" ] && [ "$VM" != "$EXPECT_VERMAGIC" ]; then
+            echo "::warning::vermagic differs from the router's, not publishing"
+            exit 0
+          fi
+
+          # stable file names, so the install script needs no version lookup
+          mkdir -p rel
+          for f in out/*.apk; do
+            b=$(basename "$f")
+            case "$b" in
+              kmod-amneziawg-*)       cp "$f" rel/kmod-amneziawg.apk ;;
+              amneziawg-tools-*)      cp "$f" rel/amneziawg-tools.apk ;;
+              luci-proto-amneziawg-*) cp "$f" rel/luci-proto-amneziawg.apk ;;
+              luci-i18n-*amnezia*)    cp "$f" rel/luci-i18n-amneziawg-ru.apk ;;
+            esac
+          done
+          files=(rel/*.apk)
+          [ ${#files[@]} -gt 0 ] || { echo "no packages to publish"; exit 1; }
+
+          rel="awg-${TAG}"
+          cat > notes.md <<EOF
+          AmneziaWG for the firmware \`${TAG}\` (${GROUP}, TP-Link Archer AX55 v1).
+
+          Kernel vermagic: \`${VM}\`
+
+          ## Automatic install (run on the router)
+
+          \`\`\`
+          wget -O - https://raw.githubusercontent.com/${GH_REPO}/refs/heads/${BRANCH}/install-awg.sh | sh -s -- ${TAG}
+          \`\`\`
+
+          ## Manual install
+
+          Copy the \`.apk\` files from the assets below to \`/tmp\` on the router and run:
+
+          \`\`\`
+          apk add --allow-untrusted /tmp/kmod-amneziawg.apk /tmp/amneziawg-tools.apk /tmp/luci-proto-amneziawg.apk
+          \`\`\`
+
+          The Russian translation \`luci-i18n-amneziawg-ru.apk\` is optional (install it after luci-proto-amneziawg):
+
+          \`\`\`
+          apk add --allow-untrusted /tmp/luci-i18n-amneziawg-ru.apk
+          \`\`\`
+
+          Works only with that exact firmware build: after updating the firmware the kernel hash changes and the packages must be rebuilt.
+          EOF
+
+          if gh release view "$rel" >/dev/null 2>&1; then
+            gh release upload "$rel" "${files[@]}" --clobber
+            gh release edit "$rel" --notes-file notes.md
+          else
+            gh release create "$rel" "${files[@]}" --title "$rel" --notes-file notes.md --target "$GITHUB_SHA"
+          fi
