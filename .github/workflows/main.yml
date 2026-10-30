@@ -90,6 +90,7 @@ jobs:
             echo "CONFIG_PACKAGE_kmod-amneziawg=m"
             echo "CONFIG_PACKAGE_amneziawg-tools=y"
             echo "CONFIG_PACKAGE_luci-proto-amneziawg=y"
+            echo "CONFIG_LUCI_LANG_ru=y"
             echo "CONFIG_PACKAGE_luci-i18n-amneziawg-ru=y"
           } >> .config
           make defconfig
@@ -142,6 +143,23 @@ jobs:
           make -j"$(nproc)" package/luci-proto-amneziawg/compile V=s
           make package/amneziawg-tools/{download,prepare} V=s
           make -j"$(nproc)" package/amneziawg-tools/compile V=s
+
+      - name: Diagnose i18n
+        if: always()
+        run: |
+          set +e
+          cd openwrt
+          echo "--- files of luci-proto-amneziawg ---"
+          find package/luci-proto-amneziawg -type f | sort | head -50
+          echo "--- po dir ---"
+          ls -la package/luci-proto-amneziawg/po 2>&1
+          echo "--- kconfig definitions ---"
+          grep -nE 'LUCI_LANG_ru|luci-i18n-amneziawg|luci-i18n-.*amnezia' tmp/.config-package.in | head -20
+          echo "--- .config ---"
+          grep -nE 'LUCI_LANG_ru|i18n.*amnezia' .config
+          echo "--- built amnezia apks ---"
+          find bin -name '*amnezia*' | sort
+          exit 0
 
       - name: Collect results
         if: always()
