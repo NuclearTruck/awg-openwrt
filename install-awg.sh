@@ -3,7 +3,7 @@
 # Usage: install-awg.sh [firmware-release-tag]
 set -e
 
-REPO="NuclearTruck/awg-openwr"          # <-- replace with your fork, e.g. myname/awg-openwrt
+REPO="NuclearTruck/awg-openwrt"          # <-- replace with your fork, e.g. myname/awg-openwrt
 TAG="$1"
 
 if [ -z "$TAG" ]; then
