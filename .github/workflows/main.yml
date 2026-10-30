@@ -1,4 +1,4 @@
-name: Build AWG for NSS release (AX55 v1)
+name: Build AWG for NSS release (AX55 v1 Ru loc)
 
 on:
   workflow_dispatch:
