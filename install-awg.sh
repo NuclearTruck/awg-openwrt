@@ -20,7 +20,7 @@ echo "Firmware release: $TAG"
 echo "Downloading from: $BASE"
 
 for p in kmod-amneziawg amneziawg-tools luci-proto-amneziawg; do
-  wget -q -O "$TMP/$p.apk" "$BASE/$p.apk" || { echo "Download failed: $p.apk (no AWG build for $TAG yet?)"; exit 1; }
+  wget -O "$TMP/$p.apk" "$BASE/$p.apk" || { echo "Download failed: $BASE/$p.apk"; exit 1; }
 done
 # optional Russian translation
 wget -q -O "$TMP/luci-i18n-amneziawg-ru.apk" "$BASE/luci-i18n-amneziawg-ru.apk" 2>/dev/null || rm -f "$TMP/luci-i18n-amneziawg-ru.apk"
