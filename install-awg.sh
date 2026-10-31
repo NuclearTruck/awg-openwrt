@@ -51,16 +51,20 @@ for p in kmod-amneziawg amneziawg-tools luci-proto-amneziawg; do
   wget -O "$TMP/$p.apk" "$BASE/$p.apk" || { echo "Download failed: $BASE/$p.apk"; exit 1; }
 done
 
+HAVE_RU=""
 if [ "$RU" = "y" ]; then
-  if ! wget -q -O "$TMP/luci-i18n-amneziawg-ru.apk" "$BASE/luci-i18n-amneziawg-ru.apk" 2>/dev/null; then
-    echo "Warning: no Russian translation in this release, skipping it."
+  echo "Downloading the Russian translation..."
+  if wget -O "$TMP/luci-i18n-amneziawg-ru.apk" "$BASE/luci-i18n-amneziawg-ru.apk"; then
+    HAVE_RU=1
+  else
+    echo "Warning: no Russian translation in release awg-$TAG, skipping it."
     rm -f "$TMP/luci-i18n-amneziawg-ru.apk"
   fi
 fi
 
 apk update || true
 apk add --allow-untrusted "$TMP"/kmod-amneziawg.apk "$TMP"/amneziawg-tools.apk "$TMP"/luci-proto-amneziawg.apk
-if [ -f "$TMP/luci-i18n-amneziawg-ru.apk" ]; then
+if [ -n "$HAVE_RU" ]; then
   apk add --allow-untrusted "$TMP/luci-i18n-amneziawg-ru.apk"
 fi
 
