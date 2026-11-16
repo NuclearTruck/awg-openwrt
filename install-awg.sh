@@ -21,7 +21,7 @@ done
 
 if [ -z "$TAG" ]; then
   TAG=$(cat /etc/apk/repositories.d/* /etc/apk/repositories 2>/dev/null \
-        | grep -oE 'ipq50xx-[0-9]{4}\.[0-9]{2}\.[0-9]{2}(-[0-9]+)?' | head -n1 || true)
+        | grep -oE '(ipq50xx|ArcherAX55v1)-[0-9]{4}\.[0-9]{2}\.[0-9]{2}(-[0-9]+)?' | head -n1 || true)
 fi
 [ -n "$TAG" ] || { echo "Cannot detect the firmware release; pass it as an argument."; exit 1; }
 
