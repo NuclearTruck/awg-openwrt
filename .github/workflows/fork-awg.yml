@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 360
     env:
       # the fork lives under the same account as this repository; change it if it does not
-      TREE_REPO: NuclearTruck/openwrt-nss-edma-Archer-AX55/
+      TREE_REPO: NuclearTruck/openwrt-nss-edma-Archer-AX55
       GROUP: ${{ inputs.group }}
       EXPECT_VERMAGIC: ${{ inputs.expect_vermagic }}
       STRICT: ${{ inputs.strict }}
